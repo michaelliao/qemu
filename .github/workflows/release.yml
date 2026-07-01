@@ -1,0 +1,94 @@
+name: Release QEMU RISC-V
+
+# Build qemu-system-riscv64 / qemu-system-riscv32 and publish them as a zip.
+# Only runs for a tag matching 'v*-vga-text' whose commit lives on the
+# 'stable-11.0' branch.
+on:
+  push:
+    tags:
+      - 'v*-vga-text'
+
+permissions:
+  contents: write
+
+# Stable branch the release tags must live on. Change this to target a
+# different stable branch in the future.
+env:
+  BRANCH_NAME: stable-11.0
+
+jobs:
+  # A tag push carries no branch, so verify the tagged commit is contained in
+  # the target stable branch. If not, the build job below is skipped.
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      on_stable: ${{ steps.check.outputs.on_stable }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tag is on ${{ env.BRANCH_NAME }}
+        id: check
+        run: |
+          git fetch --no-tags origin "$BRANCH_NAME"
+          if git merge-base --is-ancestor "$GITHUB_SHA" "origin/$BRANCH_NAME"; then
+            echo "Tag ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on ${BRANCH_NAME}."
+            echo "on_stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Tag ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on ${BRANCH_NAME}; skipping build."
+            echo "on_stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: guard
+    if: needs.guard.outputs.on_stable == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git build-essential pkg-config \
+                    python3 python3-pip python3-venv ninja-build \
+                    libglib2.0-dev libpixman-1-dev flex bison \
+                    libncurses5-dev libncursesw5-dev zip
+
+      - name: Configure (riscv64 + riscv32, no graphics)
+        run: |
+          mkdir build
+          cd build
+          ../configure --target-list=riscv64-softmmu,riscv32-softmmu \
+                       --enable-curses \
+                       --disable-sdl \
+                       --disable-gtk \
+                       --disable-werror
+
+      - name: Build
+        run: ninja -C build qemu-system-riscv64 qemu-system-riscv32
+
+      - name: Package zip
+        id: package
+        run: |
+          name="qemu-riscv-${GITHUB_REF_NAME}"
+          mkdir -p "dist/${name}"
+          cp build/qemu-system-riscv64 build/qemu-system-riscv32 "dist/${name}/"
+          # Bundle the OpenSBI firmware the machines need to boot.
+          cp pc-bios/opensbi-riscv64-generic-fw_dynamic.bin \
+             pc-bios/opensbi-riscv32-generic-fw_dynamic.bin "dist/${name}/"
+          (cd dist && zip -r "${name}.zip" "${name}")
+          echo "zip=dist/${name}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-riscv
+          path: ${{ steps.package.outputs.zip }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip }}

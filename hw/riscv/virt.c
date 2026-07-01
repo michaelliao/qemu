@@ -94,6 +94,7 @@ static const MemMapEntry virt_memmap[] = {
     [VIRT_APLIC_S] =      {  0xd000000, APLIC_SIZE(VIRT_CPUS_MAX) },
     [VIRT_UART0] =        { 0x10000000,         0x100 },
     [VIRT_VIRTIO] =       { 0x10001000,        0x1000 },
+    [VIRT_VGA_TEXT] =     { 0x10010000,        0x1100 }, /* for device VGA_TEXT */
     [VIRT_FW_CFG] =       { 0x10100000,          0x18 },
     [VIRT_FLASH] =        { 0x20000000,     0x4000000 },
     [VIRT_IMSIC_M] =      { 0x24000000, VIRT_IMSIC_MAX_SIZE },
@@ -1355,6 +1356,30 @@ static DeviceState *virt_create_aia(RISCVVirtAIAType aia_type, int aia_guests,
     return kvm_enabled() ? aplic_s : aplic_m;
 }
 
+/*
+ * VGA text-mode device (hw/display/vga_text.c).
+ *
+ * The device is mapped at VIRT_VGA_TEXT and renders its 80x25 character
+ * buffer to a character backend. We attach the second serial line
+ * (serial_hd(1)) when present so its output can be viewed on the host
+ * terminal, independent of the UART0 console; if no such backend was
+ * supplied the device is still mapped but produces no output.
+ */
+static void virt_create_vga_text(RISCVVirtState *s)
+{
+    DeviceState *dev = qdev_new("vga-text");
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    Chardev *chr = serial_hd(1);
+
+    if (chr) {
+        object_property_set_link(OBJECT(dev), "chardev", OBJECT(chr),
+                                 &error_abort);
+    }
+
+    sysbus_realize_and_unref(sbd, &error_fatal);
+    sysbus_mmio_map(sbd, 0, s->memmap[VIRT_VGA_TEXT].base);
+}
+
 static void create_platform_bus(RISCVVirtState *s, DeviceState *irqchip)
 {
     DeviceState *dev;
@@ -1696,6 +1721,9 @@ static void virt_machine_init(MachineState *machine)
     serial_mm_init(system_memory, s->memmap[VIRT_UART0].base,
         0, qdev_get_gpio_in(mmio_irqchip, UART0_IRQ), 399193,
         serial_hd(0), DEVICE_LITTLE_ENDIAN);
+
+    /* VGA text-mode device mapped at VIRT_VGA_TEXT (0x10010000) */
+    virt_create_vga_text(s);
 
     sysbus_create_simple("goldfish_rtc", s->memmap[VIRT_RTC].base,
         qdev_get_gpio_in(mmio_irqchip, RTC_IRQ));
