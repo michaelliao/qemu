@@ -45,16 +45,16 @@
 OBJECT_DECLARE_SIMPLE_TYPE(VGATextState, VGA_TEXT)
 
 #define VGA_COLS            80
-#define VGA_ROWS            25
-#define VGA_BUFFER_SIZE     (VGA_COLS * VGA_ROWS * 2)  /* 80*25*2 = 4000 bytes */
+#define VGA_ROWS            30   /* 80x30 text mode: 640x480 with 8x16 cells */
+#define VGA_BUFFER_SIZE     (VGA_COLS * VGA_ROWS * 2)  /* 80*30*2 = 4800 bytes */
 
 /*
  * MMIO window must cover the control registers (0x000-0x0FF) plus the text
- * buffer that starts at 0x100, i.e. 0x100 + 4000 = 0x10A0. Round up to
- * 0x1100 so the whole buffer is addressable; this matches the size reserved
+ * buffer that starts at 0x100, i.e. 0x100 + 4800 = 0x13C0. Round up to
+ * 0x1400 so the whole buffer is addressable; this matches the size reserved
  * for VIRT_VGA_TEXT in hw/riscv/virt.c.
  */
-#define VGA_TEXT_MMIO_SIZE   0x1100
+#define VGA_TEXT_MMIO_SIZE   0x1400
 
 /* VGA Text Mode Registers (MMIO offsets) */
 #define VGA_REG_CURSOR_X     0x00    /* Cursor X position (R/W) */
@@ -62,11 +62,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(VGATextState, VGA_TEXT)
 #define VGA_REG_COLOR        0x08    /* Default color attribute (R/W) */
 #define VGA_REG_STATUS       0x0C    /* Status register (RO) */
 #define VGA_REG_RESET        0x10    /* Reset display (WO) */
-#define VGA_REG_START_LINE   0x14    /* Top visible buffer row, 0..23 (R/W) */
+#define VGA_REG_START_LINE   0x14    /* Top visible buffer row, 0..29 (R/W) */
 #define VGA_REG_BUFFER_START 0x100   /* Character buffer start */
 
-/* Highest accepted VGA_REG_START_LINE value (hardware-scroll range 0..23) */
-#define VGA_START_LINE_MAX   23
+/* Highest accepted VGA_REG_START_LINE value (hardware-scroll range 0..29) */
+#define VGA_START_LINE_MAX   (VGA_ROWS - 1)
 
 /* Status bits */
 #define VGA_STATUS_READY     0x01
