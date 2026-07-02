@@ -20,7 +20,7 @@ jobs:
   # A tag push carries no branch, so verify the tagged commit is contained in
   # the target stable branch. If not, the build job below is skipped.
   guard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       on_stable: ${{ steps.check.outputs.on_stable }}
     steps:
