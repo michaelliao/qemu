@@ -62,7 +62,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(VGATextState, VGA_TEXT)
 #define VGA_REG_COLOR        0x08    /* Default color attribute (R/W) */
 #define VGA_REG_STATUS       0x0C    /* Status register (RO) */
 #define VGA_REG_RESET        0x10    /* Reset display (WO) */
+#define VGA_REG_START_LINE   0x14    /* Top visible buffer row, 0..23 (R/W) */
 #define VGA_REG_BUFFER_START 0x100   /* Character buffer start */
+
+/* Highest accepted VGA_REG_START_LINE value (hardware-scroll range 0..23) */
+#define VGA_START_LINE_MAX   23
 
 /* Status bits */
 #define VGA_STATUS_READY     0x01
@@ -82,9 +86,22 @@ struct VGATextState {
     uint32_t cursor_y;
     uint32_t default_color;
     uint32_t status;
-    
+    uint32_t start_line;   /* buffer row shown at the top of the screen */
+
     int need_update;
 };
+
+/*
+ * Map a logical buffer row to the physical screen row, honouring the
+ * hardware-scroll start line. The buffer is treated as a ring of VGA_ROWS
+ * rows: screen row 0 shows buffer row start_line, and so on with wraparound.
+ * This lets the guest scroll by only updating VGA_REG_START_LINE, without
+ * moving any data in the text buffer.
+ */
+static inline int vga_text_screen_row(VGATextState *s, int buf_row)
+{
+    return (buf_row - (int)s->start_line + VGA_ROWS) % VGA_ROWS;
+}
 
 /* Convert VGA attributes to compatible ANSI color stream */
 static void vga_text_emit_ansi_color(VGATextState *s, uint8_t attr, bool fg)
@@ -114,10 +131,11 @@ static void vga_text_render_char(VGATextState *s, int row, int col)
     int offset = (row * VGA_COLS + col) * 2;
     uint8_t ch = s->buffer[offset];
     uint8_t attr = s->buffer[offset + 1];
-    
-    /* cursor positioning */
+    int screen_row = vga_text_screen_row(s, row);
+
+    /* cursor positioning (buffer row mapped through the start line) */
     char buf[32];
-    int len = snprintf(buf, sizeof(buf), "\033[%d;%dH", row + 1, col + 1);
+    int len = snprintf(buf, sizeof(buf), "\033[%d;%dH", screen_row + 1, col + 1);
     qemu_chr_write_all(s->chr, (uint8_t *)buf, len);
     
     /* color */
@@ -156,10 +174,10 @@ static void vga_text_update_display(VGATextState *s, bool full_redraw)
         }
     }
     
-    /* Restore cursor and global attributes */
+    /* Restore cursor and global attributes (cursor row mapped like the text) */
     char buf[32];
-    int len = snprintf(buf, sizeof(buf), "\033[0m\033[%d;%dH", 
-                       s->cursor_y + 1, s->cursor_x + 1);
+    int len = snprintf(buf, sizeof(buf), "\033[0m\033[%d;%dH",
+                       vga_text_screen_row(s, s->cursor_y) + 1, s->cursor_x + 1);
     qemu_chr_write_all(s->chr, (uint8_t *)buf, len);
     
     if (changed) {
@@ -198,10 +216,22 @@ static void vga_text_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigne
         memset(s->old_buffer, 0, sizeof(s->old_buffer));
         s->cursor_x = 0;
         s->cursor_y = 0;
+        s->start_line = 0;
         s->status = VGA_STATUS_READY;
         vga_text_update_display(s, true);
         break;
-        
+
+    case VGA_REG_START_LINE:
+        /*
+         * Scroll by changing which buffer row maps to the top of the screen.
+         * The mapping of every cell changes, so a full redraw is required.
+         */
+        if (val <= VGA_START_LINE_MAX && s->start_line != val) {
+            s->start_line = val;
+            vga_text_update_display(s, true);
+        }
+        break;
+
     default:
         if (addr >= VGA_REG_BUFFER_START && 
             addr < VGA_REG_BUFFER_START + VGA_BUFFER_SIZE) {
@@ -223,7 +253,8 @@ static void vga_text_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigne
     } else if (cursor_moved && s->chr) {
         /* Only cursor moved */
         char buf[32];
-        int len = snprintf(buf, sizeof(buf), "\033[%d;%dH", s->cursor_y + 1, s->cursor_x + 1);
+        int len = snprintf(buf, sizeof(buf), "\033[%d;%dH",
+                           vga_text_screen_row(s, s->cursor_y) + 1, s->cursor_x + 1);
         qemu_chr_write_all(s->chr, (uint8_t *)buf, len);
     }
 }
@@ -236,6 +267,7 @@ static uint64_t vga_text_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case VGA_REG_CURSOR_X: return s->cursor_x;
     case VGA_REG_CURSOR_Y: return s->cursor_y;
     case VGA_REG_COLOR:    return s->default_color;
+    case VGA_REG_START_LINE: return s->start_line;
     case VGA_REG_STATUS: {
         uint64_t ret = s->status;
         s->status &= ~VGA_STATUS_UPDATED;
@@ -281,6 +313,7 @@ static void vga_text_realize(DeviceState *dev, Error **errp)
     memset(s->old_buffer, 0, sizeof(s->old_buffer));
     s->cursor_x = 0;
     s->cursor_y = 0;
+    s->start_line = 0;
     s->default_color = 0x07;
     s->status = VGA_STATUS_READY;
     s->need_update = 0;
