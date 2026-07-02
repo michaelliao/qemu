@@ -2,29 +2,6 @@
  * QEMU VGA Text Mode Device
  * 80x25 character display with MMIO mapping for QEMU 11.0
  * Output to console/SSH terminal via Chardev with incremental rendering
- * 
- * QEMU development env:
- * 
- * sudo apt install -y git build-essential python3 python3-pip python3-venv \
- *                     ninja-build pkg-config libglib2.0-dev libpixman-1-dev \
- *                     flex bison libncurses5-dev libncursesw5-dev
- * 
- * mkdir build && cd build
- * ../configure --target-list=riscv32-softmmu \
- *              --enable-curses \
- *              --enable-debug \
- *              --disable-sdl \
- *              --disable-gtk \
- *              --disable-werror
- * ninja
- *
- * Usage:
- *
- * ./qemu-system-riscv32 -machine virt \
- *                       -m 128M \
- *                       -global virtio-mmio.force-legacy=false \
- *                       -drive file=$(DISK),if=none,format=raw,id=x0 \
- *                       -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
  */
 
 #include "qemu/osdep.h"
