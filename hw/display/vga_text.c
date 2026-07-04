@@ -80,23 +80,32 @@ static inline int vga_text_screen_row(VGATextState *s, int buf_row)
     return (buf_row - (int)s->start_line + VGA_ROWS) % VGA_ROWS;
 }
 
-/* Convert VGA attributes to compatible ANSI color stream */
+/*
+ * Convert one VGA colour nibble to an ANSI SGR colour code and emit it.
+ *
+ * VGA packs colour bits as (I)(R)(G)(B): bit0=blue, bit1=green, bit2=red,
+ * bit3=intensity. ANSI SGR orders its base colours differently: the offset
+ * added to 30/40 is bit0=red, bit1=green, bit2=blue. Red and blue are thus
+ * swapped relative to VGA, so a direct copy would turn blue into red and vice
+ * versa. vga_to_ansi[] performs that swap, e.g. VGA 1 (blue) -> ANSI 4
+ * (\033[34m), VGA 4 (red) -> ANSI 1 (\033[31m), VGA 3 (cyan) -> ANSI 6,
+ * VGA 6 (yellow) -> ANSI 3. The intensity bit selects the bright range
+ * (90/100 instead of 30/40) for both foreground and background.
+ */
 static void vga_text_emit_ansi_color(VGATextState *s, uint8_t attr, bool fg)
 {
-    uint8_t color = fg ? (attr & 0x0F) : ((attr >> 4) & 0x0F);
-    uint8_t ansi_code;
-    
-    if (fg && (attr & 0x08)) {
-        color &= 0x07;
-        ansi_code = 90 + color;
-    } else if (!fg && (color & 0x08)) {
-        color &= 0x07;
-        ansi_code = 100 + color;
+    static const uint8_t vga_to_ansi[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
+    uint8_t nibble = fg ? (attr & 0x0F) : ((attr >> 4) & 0x0F);
+    uint8_t base = vga_to_ansi[nibble & 0x07];
+    bool bright = nibble & 0x08;
+    unsigned ansi_code;
+
+    if (fg) {
+        ansi_code = (bright ? 90 : 30) + base;
     } else {
-        static const uint8_t ansi_map[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };
-        ansi_code = fg ? ansi_map[color & 0x07] : (40 + (color & 0x07));
+        ansi_code = (bright ? 100 : 40) + base;
     }
-    
+
     char buf[16];
     int len = snprintf(buf, sizeof(buf), "\033[%dm", ansi_code);
     qemu_chr_write_all(s->chr, (uint8_t *)buf, len);
