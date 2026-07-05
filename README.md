@@ -1,9 +1,25 @@
-
-This repo is the source code of QEMU and active branch is set to `stable-11.0`.
+This repo is the source code of QEMU and the default branch is set to `stable-11.0`.
 
 ## Scope of the custom work
 
-A simple MMIO character-display device (`VGA-Text`, 80x30) to the RISC-V `virt` board. It renders its text buffer to a character backend (a terminal, e.g. the one reached over SSH) using ANSI escape sequences. Only the RISC-V softmmu targets are built — no x86/ARM, no graphics (SDL/GTK disabled).
+A simple MMIO character-display device (`VGA-Text`, 80x30) is added to the RISC-V `virt` board. It renders its text buffer to a character backend (a terminal, e.g. the one reached over SSH) using ANSI escape sequences. Only the RISC-V softmmu targets are built — no x86/ARM, no graphics (SDL/GTK disabled).
+
+```
+  ┌─────────────┐ ┌─────────────┐
+  │tty for UART │ │ tty for VGA │
+  │    rx/tx    │ │   display   │
+  └─────────────┘ └─────────────┘
+         ▲               ▲
+         │               │
+         ▼               │
+  ┌─────────────┐ ┌─────────────┐
+┌─┤    UART     ├─┤  VGA-Text   ├─┐
+│ └─────────────┘ └─────────────┘ │
+│                                 │
+│       qemu-system-riscv32       │
+│                                 │
+└─────────────────────────────────┘
+```
 
 Files that make up the feature:
 
@@ -13,6 +29,10 @@ Files that make up the feature:
 | `hw/display/meson.build` | Adds `vga_text.c` to `system_ss`. |
 | `include/hw/riscv/virt.h` | Declares the `VIRT_VGA_TEXT` memmap slot. |
 | `hw/riscv/virt.c` | Reserves the memmap entry and instantiates the device. |
+
+## Download
+
+Download [latest release](https://github.com/michaelliao/qemu/releases/latest) or use script [update-qemu.sh](download/update-qemu.sh) to download latest release, unzip and create symbol link at `~/.local/bin/qemu-system-riscv32-vga`.
 
 ## Build
 
@@ -38,6 +58,8 @@ mkdir build && cd build
              --disable-werror
 ninja qemu-system-riscv64 qemu-system-riscv32
 ```
+
+The GitHub action [release.yml](.github/workflows/release.yml) contains the complete build script.
 
 ## Running
 
@@ -65,9 +87,8 @@ Then start QEMU:
 
 ```sh
 # start_qemu.sh
-
 @if [ ! -f ./vga.tty ]; then \
-    echo "ERROR: Please run 'make vga' in your display window first!"; \
+    echo "ERROR: Please create a tty for VGA first!"; \
     exit 1; \
 fi
 @echo 'Press Ctrl-C to exit QEMU.'
