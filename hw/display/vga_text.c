@@ -1,6 +1,6 @@
 /*
  * QEMU VGA Text Mode Device
- * 80x30 character display with MMIO mapping for QEMU 11.0
+ * 80x25 character display with MMIO mapping for QEMU 11.0
  * Output to console/SSH terminal via Chardev with incremental rendering
  *
  * UMA design: the text buffer (frame buffer, FB) lives in guest main memory.
@@ -46,7 +46,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(VGATextState, VGA_TEXT)
 #define VGA_REG_COLOR        0x08    /* Default color attribute (R/W) */
 #define VGA_REG_STATUS       0x0C    /* Status register (RO) */
 #define VGA_REG_RESET        0x10    /* Reset display (WO) */
-#define VGA_REG_START_LINE   0x14    /* Top visible buffer row, 0..29 (R/W) */
+#define VGA_REG_START_LINE   0x14    /* Top visible buffer row, 0..24 (R/W) */
 #define VGA_REG_FB_ADDR_LO   0x18    /* Frame buffer address, bits 31..0 (R/W) */
 #define VGA_REG_FB_ADDR_HI   0x1C    /* Frame buffer address, bits 63..32 (R/W, 0 on rv32) */
 
@@ -54,7 +54,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(VGATextState, VGA_TEXT)
 #define VGA_REFRESH_HZ       30
 #define VGA_REFRESH_PERIOD_NS (NANOSECONDS_PER_SECOND / VGA_REFRESH_HZ)
 
-/* Highest accepted VGA_REG_START_LINE value (hardware-scroll range 0..29) */
+/* Highest accepted VGA_REG_START_LINE value (hardware-scroll range 0..24) */
 #define VGA_START_LINE_MAX   (VGA_ROWS - 1)
 
 /* Status bits */
@@ -409,7 +409,7 @@ static void vga_text_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize = vga_text_realize;
     device_class_set_legacy_reset(dc, vga_text_reset);
-    dc->desc = "VGA Text Mode Device (80x30) for QEMU";
+    dc->desc = "VGA Text Mode Device (80x25) for QEMU";
     dc->user_creatable = true;
     device_class_set_props(dc, vga_text_properties);
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
