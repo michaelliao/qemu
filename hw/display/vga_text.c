@@ -1,13 +1,21 @@
 /*
  * QEMU VGA Text Mode Device
- * 80x25 character display with MMIO mapping for QEMU 11.0
+ * 80x30 character display with MMIO mapping for QEMU 11.0
  * Output to console/SSH terminal via Chardev with incremental rendering
+ *
+ * UMA design: the text buffer (frame buffer, FB) lives in guest main memory.
+ * The guest kernel allocates it and programs its address into
+ * VGA_REG_FB_ADDR_LO/HI; a 30 Hz refresh timer then copies the FB into the
+ * device's shadow buffer and redraws the changed cells.
  */
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
+#include "qemu/target-info.h"
+#include "hw/core/cpu.h"
 #include "system/memory.h"
 #include "hw/core/boards.h"
 #include "hw/core/sysbus.h"
@@ -22,16 +30,15 @@
 OBJECT_DECLARE_SIMPLE_TYPE(VGATextState, VGA_TEXT)
 
 #define VGA_COLS            80
-#define VGA_ROWS            30   /* 80x30 text mode: 640x480 with 8x16 cells */
-#define VGA_BUFFER_SIZE     (VGA_COLS * VGA_ROWS * 2)  /* 80*30*2 = 4800 bytes */
+#define VGA_ROWS            25   /* 80x25 text mode */
+#define VGA_BUFFER_SIZE     (VGA_COLS * VGA_ROWS * 2)  /* 80*25*2 = 4000 bytes */
 
 /*
- * MMIO window must cover the control registers (0x000-0x0FF) plus the text
- * buffer that starts at 0x100, i.e. 0x100 + 4800 = 0x13C0. Round up to
- * 0x1400 so the whole buffer is addressable; this matches the size reserved
- * for VIRT_VGA_TEXT in hw/riscv/virt.c.
+ * MMIO window size. Only the control registers (0x000-0x01F) are implemented
+ * now that the text buffer lives in guest memory, but the window is kept at
+ * 0x100 to match the size reserved for VIRT_VGA_TEXT in hw/riscv/virt.c.
  */
-#define VGA_TEXT_MMIO_SIZE   0x1400
+#define VGA_TEXT_MMIO_SIZE   0x100
 
 /* VGA Text Mode Registers (MMIO offsets) */
 #define VGA_REG_CURSOR_X     0x00    /* Cursor X position (R/W) */
@@ -40,7 +47,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(VGATextState, VGA_TEXT)
 #define VGA_REG_STATUS       0x0C    /* Status register (RO) */
 #define VGA_REG_RESET        0x10    /* Reset display (WO) */
 #define VGA_REG_START_LINE   0x14    /* Top visible buffer row, 0..29 (R/W) */
-#define VGA_REG_BUFFER_START 0x100   /* Character buffer start */
+#define VGA_REG_FB_ADDR_LO   0x18    /* Frame buffer address, bits 31..0 (R/W) */
+#define VGA_REG_FB_ADDR_HI   0x1C    /* Frame buffer address, bits 63..32 (R/W, 0 on rv32) */
+
+/* Refresh timer period: 30 frames per second */
+#define VGA_REFRESH_HZ       30
+#define VGA_REFRESH_PERIOD_NS (NANOSECONDS_PER_SECOND / VGA_REFRESH_HZ)
 
 /* Highest accepted VGA_REG_START_LINE value (hardware-scroll range 0..29) */
 #define VGA_START_LINE_MAX   (VGA_ROWS - 1)
@@ -53,19 +65,22 @@ struct VGATextState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
     Chardev *chr;
-    
+    QEMUTimer *refresh_timer;
+
     uint64_t base_addr;
 
     /* VGA 核心状态 */
-    uint8_t buffer[VGA_BUFFER_SIZE];
-    uint8_t old_buffer[VGA_BUFFER_SIZE];
+    uint8_t buffer[VGA_BUFFER_SIZE];     /* shadow copy of the guest FB */
+    uint8_t old_buffer[VGA_BUFFER_SIZE]; /* what is currently on the terminal */
+    uint64_t fb_addr;      /* guest FB address (PA, or VA when MMU is on); 0 = unset */
+    CPUState *fb_cpu;      /* CPU whose MMU translates fb_addr */
     uint32_t cursor_x;
     uint32_t cursor_y;
     uint32_t default_color;
     uint32_t status;
     uint32_t start_line;   /* buffer row shown at the top of the screen */
 
-    int need_update;
+    bool need_full_redraw;
 };
 
 /*
@@ -160,16 +175,82 @@ static void vga_text_update_display(VGATextState *s, bool full_redraw)
         }
     }
     
-    /* Restore cursor and global attributes (cursor row mapped like the text) */
-    char buf[32];
-    int len = snprintf(buf, sizeof(buf), "\033[0m\033[%d;%dH",
-                       vga_text_screen_row(s, s->cursor_y) + 1, s->cursor_x + 1);
-    qemu_chr_write_all(s->chr, (uint8_t *)buf, len);
-    
     if (changed) {
+        /* Restore cursor and global attributes (cursor row mapped like the text) */
+        char buf[32];
+        int len = snprintf(buf, sizeof(buf), "\033[0m\033[%d;%dH",
+                           vga_text_screen_row(s, s->cursor_y) + 1, s->cursor_x + 1);
+        qemu_chr_write_all(s->chr, (uint8_t *)buf, len);
         s->status |= VGA_STATUS_UPDATED;
     }
-    s->need_update = 0;
+}
+
+/* Fill the shadow buffer with blank cells in the default colour */
+static void vga_text_fill_blank(VGATextState *s)
+{
+    for (int i = 0; i < VGA_BUFFER_SIZE; i += 2) {
+        s->buffer[i] = ' ';
+        s->buffer[i + 1] = s->default_color;
+    }
+}
+
+/*
+ * Copy the guest frame buffer into the shadow buffer.
+ *
+ * fb_addr may be a physical address (MMU off) or a virtual address (MMU on),
+ * so it is read through the MMU of the CPU that programmed it:
+ * cpu_memory_rw_debug() walks that CPU's current page tables, and with
+ * translation disabled it degenerates to a physical access. The FB may span
+ * a page boundary with non-contiguous physical pages; the debug accessor
+ * translates page by page. On a translation fault the previous frame is kept.
+ */
+static void vga_text_fetch_fb(VGATextState *s)
+{
+    uint8_t frame[VGA_BUFFER_SIZE];
+
+    if (s->fb_addr == 0 || !s->fb_cpu) {
+        vga_text_fill_blank(s);
+        return;
+    }
+
+    if (cpu_memory_rw_debug(s->fb_cpu, s->fb_addr, frame, sizeof(frame),
+                            false) < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "vga-text: cannot read frame buffer at 0x%" PRIx64 "\n",
+                      s->fb_addr);
+        return;
+    }
+    memcpy(s->buffer, frame, sizeof(frame));
+}
+
+/* 30 Hz refresh: pull the FB from guest memory and redraw changed cells */
+static void vga_text_refresh(void *opaque)
+{
+    VGATextState *s = opaque;
+    bool full = s->need_full_redraw;
+
+    vga_text_fetch_fb(s);
+    s->need_full_redraw = false;
+    vga_text_update_display(s, full);
+
+    timer_mod(s->refresh_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VGA_REFRESH_PERIOD_NS);
+}
+
+/*
+ * Latch the FB address. The writing CPU is remembered so a virtual FB
+ * address is later translated with that CPU's MMU (the guest kernel's
+ * mapping). rv32 has 32-bit addresses, so the high word is forced to 0.
+ */
+static void vga_text_set_fb_addr(VGATextState *s, uint64_t addr)
+{
+    if (target_long_bits() == 32) {
+        addr &= 0xFFFFFFFFULL;
+    }
+    s->fb_addr = addr;
+    if (current_cpu) {
+        s->fb_cpu = current_cpu;
+    }
 }
 
 /* MMIO Write */
@@ -198,13 +279,16 @@ static void vga_text_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigne
         break;
         
     case VGA_REG_RESET:
-        memset(s->buffer, 0, sizeof(s->buffer));
-        memset(s->old_buffer, 0, sizeof(s->old_buffer));
+        /*
+         * The text buffer belongs to the guest now, so it is not cleared
+         * here; reset the cursor/scroll state and redraw the whole screen
+         * from the FB on the next refresh tick.
+         */
         s->cursor_x = 0;
         s->cursor_y = 0;
         s->start_line = 0;
         s->status = VGA_STATUS_READY;
-        vga_text_update_display(s, true);
+        s->need_full_redraw = true;
         break;
 
     case VGA_REG_START_LINE:
@@ -214,29 +298,24 @@ static void vga_text_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigne
          */
         if (val <= VGA_START_LINE_MAX && s->start_line != val) {
             s->start_line = val;
-            vga_text_update_display(s, true);
+            s->need_full_redraw = true;
         }
         break;
 
+    case VGA_REG_FB_ADDR_LO:
+        vga_text_set_fb_addr(s, deposit64(s->fb_addr, 0, 32, val));
+        break;
+
+    case VGA_REG_FB_ADDR_HI:
+        vga_text_set_fb_addr(s, deposit64(s->fb_addr, 32, 32, val));
+        break;
+
     default:
-        if (addr >= VGA_REG_BUFFER_START && 
-            addr < VGA_REG_BUFFER_START + VGA_BUFFER_SIZE) {
-            int offset = addr - VGA_REG_BUFFER_START;
-            if (offset < VGA_BUFFER_SIZE) {
-                if (s->buffer[offset] != (val & 0xFF)) {
-                    s->buffer[offset] = val & 0xFF;
-                    s->need_update = 1;
-                }
-            }
-        } else {
-            qemu_log_mask(LOG_UNIMP, "vga-text: Unimplemented write at 0x%" HWADDR_PRIx "\n", addr);
-        }
+        qemu_log_mask(LOG_UNIMP, "vga-text: Unimplemented write at 0x%" HWADDR_PRIx "\n", addr);
         break;
     }
-    
-    if (s->need_update) {
-        vga_text_update_display(s, false);
-    } else if (cursor_moved && s->chr) {
+
+    if (cursor_moved && s->chr) {
         /* Only cursor moved */
         char buf[32];
         int len = snprintf(buf, sizeof(buf), "\033[%d;%dH",
@@ -254,16 +333,14 @@ static uint64_t vga_text_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case VGA_REG_CURSOR_Y: return s->cursor_y;
     case VGA_REG_COLOR:    return s->default_color;
     case VGA_REG_START_LINE: return s->start_line;
+    case VGA_REG_FB_ADDR_LO: return extract64(s->fb_addr, 0, 32);
+    case VGA_REG_FB_ADDR_HI: return extract64(s->fb_addr, 32, 32);
     case VGA_REG_STATUS: {
         uint64_t ret = s->status;
         s->status &= ~VGA_STATUS_UPDATED;
         return ret;
     }
     default:
-        if (addr >= VGA_REG_BUFFER_START && addr < VGA_REG_BUFFER_START + VGA_BUFFER_SIZE) {
-            int offset = addr - VGA_REG_BUFFER_START;
-            return s->buffer[offset];
-        }
         break;
     }
     return 0;
@@ -278,10 +355,26 @@ static const MemoryRegionOps vga_text_mmio_ops = {
         .max_access_size = 4,
     },
     .impl = {
-        .min_access_size = 1,
-        .max_access_size = 1,
+        .min_access_size = 4,
+        .max_access_size = 4,
     },
 };
+
+static void vga_text_reset(DeviceState *dev)
+{
+    VGATextState *s = VGA_TEXT(dev);
+
+    memset(s->old_buffer, 0, sizeof(s->old_buffer));
+    s->fb_addr = 0;
+    s->fb_cpu = NULL;
+    s->cursor_x = 0;
+    s->cursor_y = 0;
+    s->start_line = 0;
+    s->default_color = 0x07;
+    s->status = VGA_STATUS_READY;
+    s->need_full_redraw = true;
+    vga_text_fill_blank(s);
+}
 
 static void vga_text_realize(DeviceState *dev, Error **errp)
 {
@@ -295,14 +388,11 @@ static void vga_text_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(sbd, 0, s->base_addr);
     }
     
-    memset(s->buffer, 0, sizeof(s->buffer));
-    memset(s->old_buffer, 0, sizeof(s->old_buffer));
-    s->cursor_x = 0;
-    s->cursor_y = 0;
-    s->start_line = 0;
-    s->default_color = 0x07;
-    s->status = VGA_STATUS_READY;
-    s->need_update = 0;
+    vga_text_reset(dev);
+
+    s->refresh_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, vga_text_refresh, s);
+    timer_mod(s->refresh_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VGA_REFRESH_PERIOD_NS);
 }
 
 /*
@@ -318,7 +408,8 @@ static void vga_text_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize = vga_text_realize;
-    dc->desc = "VGA Text Mode Device (80x25) for QEMU";
+    device_class_set_legacy_reset(dc, vga_text_reset);
+    dc->desc = "VGA Text Mode Device (80x30) for QEMU";
     dc->user_creatable = true;
     device_class_set_props(dc, vga_text_properties);
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
