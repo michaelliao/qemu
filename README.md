@@ -2,7 +2,7 @@ This repo is the source code of QEMU and the default branch is set to `stable-11
 
 ## Scope of the custom work
 
-A simple MMIO character-display device (`VGA-Text`, 80x30) is added to the RISC-V `virt` board. It renders its text buffer to a character backend (a terminal, e.g. the one reached over SSH) using ANSI escape sequences. Only the RISC-V softmmu targets are built — no x86/ARM, no graphics (SDL/GTK disabled).
+A simple MMIO character-display device (`VGA-Text`, 80x25) is added to the RISC-V `virt` board. It renders its text buffer to a character backend (a terminal, e.g. the one reached over SSH) using ANSI escape sequences. Only the RISC-V softmmu targets are built — no x86/ARM, no graphics (SDL/GTK disabled).
 
 ```
   ┌─────────────┐ ┌─────────────┐
@@ -111,17 +111,18 @@ MMIO window: `0x1400` bytes at base `0x10010000`.
 Registers (all little/native endian, byte-addressable):
 
 | Offset | Name | Access | Meaning |
-| --- | --- | --- | --- |
-| `0x000` | `CURSOR_X` | R/W | Cursor column (0..79) |
-| `0x004` | `CURSOR_Y` | R/W | Cursor row (0..29) |
-| `0x008` | `COLOR` | R/W | Default color attribute |
-| `0x00C` | `STATUS` | RO | Bit0 READY, Bit1 UPDATED (cleared on read) |
-| `0x010` | `RESET` | WO | Clear buffer + cursor, full redraw |
-| `0x014` | `START_LINE` | R/W | Top visible buffer row (0..29); hardware scroll |
-| `0x100` | `BUFFER` | R/W | 4800-byte text buffer |
+| ------ | ---- | ------ | ------- |
+| `0x00` | `CURSOR_X` | R/W | Cursor column (0..79) |
+| `0x04` | `CURSOR_Y` | R/W | Cursor row (0..29) |
+| `0x08` | `COLOR` | R/W | Default color attribute |
+| `0x0C` | `STATUS` | RO | Bit0 READY, Bit1 UPDATED (cleared on read) |
+| `0x10` | `RESET` | WO | Clear buffer + cursor, full redraw |
+| `0x14` | `START_LINE` | R/W | Top visible buffer row (0..29); hardware scroll |
+| `0x18` | `FB_ADDR_LO` | WO | Frame buffer address, lower 32 bits |
+| `0x1C` | `FB_ADDR_HI` | WO | Frame buffer address, higher 32 bits (Set 0 for RV32) |
 
-Text buffer layout: `80 * 30` cells, 2 bytes each — byte 0 = ASCII character, byte 1 = VGA attribute (low nibble = foreground, high nibble = background, with the usual intensity bit). The buffer spans `[0x100, 0x13C0)`, so the MMIO window is sized `0x1400` (must stay in sync with the `VIRT_VGA_TEXT` size in `hw/riscv/virt.c`).
+Text buffer layout: `80 * 25` cells, 2 bytes each — byte 0 = ASCII character, byte 1 = VGA attribute (low nibble = foreground, high nibble = background, with the usual intensity bit). MMIO window is sized `0x100` (must stay in sync with the `VIRT_VGA_TEXT` size in `hw/riscv/virt.c`).
 
 Writes to the buffer trigger an incremental redraw: only changed cells are re-emitted (cursor-positioned + colored) to the backend, tracked against `old_buffer`.
 
-`START_LINE` implements hardware-style scrolling: the buffer is treated as a ring of 30 rows and physical screen row `r` displays buffer row `(start_line + r) % 30`. Scrolling therefore only updates this register — no buffer data is moved. Changing it maps every cell to a new screen position, so it forces a full redraw; the cursor (`CURSOR_Y`) is a logical buffer row and is mapped through the same offset.
+`START_LINE` implements hardware-style scrolling: the buffer is treated as a ring of 25 rows and physical screen row `r` displays buffer row `(start_line + r) % 25`. Scrolling therefore only updates this register — no buffer data is moved. Changing it maps every cell to a new screen position, so it forces a full redraw; the cursor (`CURSOR_Y`) is a logical buffer row and is mapped through the same offset.
