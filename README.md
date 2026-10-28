@@ -16,7 +16,7 @@ A simple MMIO character-display device (`VGA-Text`, 80x25) is added to the RISC-
 ┌─┤    UART     ├─┤  VGA-Text   ├─┐
 │ └─────────────┘ └─────────────┘ │
 │                                 │
-│       qemu-system-riscv32       │
+│        qemu-system-riscv        │
 │                                 │
 └─────────────────────────────────┘
 ```
@@ -24,7 +24,7 @@ A simple MMIO character-display device (`VGA-Text`, 80x25) is added to the RISC-
 Files that make up the feature:
 
 | File | Role |
-| --- | --- |
+| ---- | ---- |
 | `hw/display/vga_text.c` | The device implementation (QOM type `vga-text`). |
 | `hw/display/meson.build` | Adds `vga_text.c` to `system_ss`. |
 | `include/hw/riscv/virt.h` | Declares the `VIRT_VGA_TEXT` memmap slot. |
@@ -32,7 +32,17 @@ Files that make up the feature:
 
 ## Download
 
-Download [latest release](https://github.com/michaelliao/qemu/releases/latest) or use script [update-qemu.sh](download/update-qemu.sh) to download latest release, unzip and create symbol link at `~/.local/bin/qemu-system-riscv32-vga`.
+Download [latest release](https://github.com/michaelliao/qemu/releases/latest) or run command to get latest release:
+
+```plain
+curl -fsSL https://raw.githubusercontent.com/michaelliao/qemu/refs/heads/stable-11.0/download/get-qemu-vga.sh | bash
+```
+
+The release is downloaded and extracted at `~/.local/qemu-vga`, and symbol links are created at `~/.local/bin`.
+
+## Run
+
+Run `qemu-system-riscv32-vga` or `qemu-system-riscv64-vga` on Linux x64.
 
 ## Build
 
