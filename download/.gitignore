@@ -1,3 +1,0 @@
-# ignore download zip and dir:
-*.zip
-qemu-riscv-*
