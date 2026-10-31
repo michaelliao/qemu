@@ -40,6 +40,20 @@ curl -fsSL https://raw.githubusercontent.com/michaelliao/qemu/refs/heads/stable-
 
 The release is downloaded and extracted at `~/.local/qemu-vga`, and symbol links are created at `~/.local/bin`.
 
+```plain
+~$ tree .local
+.local
+├── bin
+│   ├── qemu-system-riscv32-vga -> ~/.local/qemu-vga/qemu-riscv-v11.x.y.z-vga-text/qemu-system-riscv32
+│   └── qemu-system-riscv64-vga -> ~/.local/qemu-vga/qemu-riscv-v11.x.y.z-vga-text/qemu-system-riscv64
+└── qemu-vga
+    └── qemu-riscv-v11.x.y.z-vga-text
+        ├── opensbi-riscv32-generic-fw_dynamic.bin
+        ├── opensbi-riscv64-generic-fw_dynamic.bin
+        ├── qemu-system-riscv32
+        └── qemu-system-riscv64
+```
+
 ## Run
 
 Run `qemu-system-riscv32-vga` or `qemu-system-riscv64-vga` on Linux x64.
